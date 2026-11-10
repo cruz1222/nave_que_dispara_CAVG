@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graficación 2D – Nave Vectorial</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #07080f;
+    --panel: #12162a;
+    --text: #e1e8f5;
+    --muted: #8a94b3;
+    --accent: #78aaff;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 16px;
+  }
+  h1 { font-size: 1.15rem; margin: 4px 0 0; font-weight: 600; }
+  h1 span { color: var(--accent); }
+  #wrap { width: 100%; max-width: 800px; position: relative; }
+  canvas {
+    width: 100%; height: auto; aspect-ratio: 4 / 3; display: block;
+    border: 1px solid #232a4a; border-radius: 10px; background: #000; touch-action: none;
+  }
+  #pausa {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(5, 6, 14, .6); border-radius: 10px; font-size: 1.4rem; letter-spacing: .2em;
+  }
+  .ayuda {
+    width: 100%; max-width: 800px; background: var(--panel); border-radius: 10px;
+    padding: 12px 16px; font-size: .88rem; color: var(--muted); line-height: 1.7;
+  }
+  kbd {
+    background: #1d2342; color: var(--text); border: 1px solid #2c3560; border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 6px; font-size: .8rem; font-family: inherit;
+  }
+  #tactil { display: none; width: 100%; max-width: 800px; justify-content: space-between; gap: 10px; }
+  #tactil .grupo { display: flex; gap: 8px; }
+  #tactil button {
+    width: 64px; height: 64px; border-radius: 50%; border: 1px solid #2c3560;
+    background: var(--panel); color: var(--text); font-size: 1.3rem;
+    user-select: none; -webkit-user-select: none; touch-action: none;
+  }
+  #tactil button.on { background: #24305e; }
+  @media (pointer: coarse) { #tactil { display: flex; } }
+</style>
+</head>
+<body>
+  <h1>Graficación 2D · <span>Nave Vectorial</span></h1>
+
+  <div id="wrap">
+    <canvas id="lienzo" width="800" height="600"></canvas>
+    <div id="pausa">PAUSA</div>
+  </div>
+
+  <div id="tactil">
+    <div class="grupo">
+      <button data-k="izq">◀</button>
+      <button data-k="der">▶</button>
+    </div>
+    <div class="grupo">
+      <button data-k="rev">▼</button>
+      <button data-k="avance">▲</button>
+      <button data-k="fuego">●</button>
+    </div>
+  </div>
+
+  <div class="ayuda">
+    <kbd>A</kbd>/<kbd>←</kbd> gira a la izquierda · <kbd>D</kbd>/<kbd>→</kbd> gira a la derecha ·
+    <kbd>W</kbd>/<kbd>↑</kbd> avanza · <kbd>S</kbd>/<kbd>↓</kbd> reversa ·
+    <kbd>Espacio</kbd> dispara · <kbd>Esc</kbd> pausa
+  </div>
+
+<script>
+// ---------------------------------------------------------------
+// 1. INICIALIZACIÓN
+// ---------------------------------------------------------------
+const ANCHO = 800, ALTO = 600;
+const lienzo = document.getElementById('lienzo');
+const ctx = lienzo.getContext('2d');
+const capaPausa = document.getElementById('pausa');
+
+// Constantes de juego (igual que en la versión de pygame)
+const FPS = 60;
+const VEL_ROTACION = 3.5;      // grados por cuadro
+const VEL_NAVE = 4;            // píxeles por cuadro al avanzar
+const VEL_REVERSA = 2.5;       // píxeles por cuadro al retroceder
+const VEL_PROYECTIL = 10;      // píxeles por cuadro
+const VIDA_PROYECTIL = 90;     // cuadros de vida
+const COOLDOWN_DISPARO = 250;  // ms entre disparos
+const VIDA_ESTELA = 40;        // cuadros que dura cada partícula de la estela
+
+const COLOR_NAVE = 'rgb(225, 232, 245)';
+const COLOR_BORDE = 'rgb(120, 170, 255)';
+const FUENTE = "16px Consolas, 'Courier New', monospace";
+
+// ---------------------------------------------------------------
+// FONDO DE ESPACIO (fijo, se genera una sola vez)
+// ---------------------------------------------------------------
+// Generador pseudoaleatorio con semilla (equivale a random.seed(7))
+function crearRandom(semilla) {
+  let a = semilla >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const aleatorio = (a, b) => a + Math.random() * (b - a);
+
+function crearFondo() {
+  const fondo = document.createElement('canvas');
+  fondo.width = ANCHO; fondo.height = ALTO;
+  const f = fondo.getContext('2d');
+  const rnd = crearRandom(7);
+  const entre = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+
+  // Degradado vertical azul-negro, fila por fila
+  for (let y = 0; y < ALTO; y++) {
+    const t = y / ALTO;
+    f.fillStyle = `rgb(${Math.floor(8 + 14 * t)}, ${Math.floor(8 + 6 * t)}, ${Math.floor(22 + 30 * t)})`;
+    f.fillRect(0, y, ANCHO, 1);
+  }
+
+  // Nebulosas: círculos concéntricos casi transparentes (alfa 5/255)
+  const colores = [[90, 40, 140], [40, 70, 160], [130, 40, 90]];
+  for (let n = 0; n < 6; n++) {
+    const cx = entre(0, ANCHO), cy = entre(0, ALTO);
+    const base = colores[Math.floor(rnd() * colores.length)];
+    for (let r = 160; r > 20; r -= 20) {
+      f.fillStyle = `rgba(${base[0]}, ${base[1]}, ${base[2]}, ${5 / 255})`;
+      f.beginPath(); f.arc(cx, cy, r, 0, Math.PI * 2); f.fill();
+    }
+  }
+
+  // Estrellas fijas
+  for (let i = 0; i < 220; i++) {
+    const x = entre(0, ANCHO - 1), y = entre(0, ALTO - 1);
+    const brillo = entre(110, 255);
+    const radio = rnd() < 0.85 ? 1 : 2;
+    f.fillStyle = `rgb(${brillo}, ${brillo}, ${Math.min(255, brillo + 20)})`;
+    f.beginPath(); f.arc(x, y, radio, 0, Math.PI * 2); f.fill();
+  }
+  return fondo;
+}
+const fondoEspacio = crearFondo();
+
+// Estrellas que parpadean: (x, y, fase). La fase desfasa el parpadeo de cada una.
+const estrellasParpadeo = Array.from({ length: 40 }, () => [
+  Math.floor(aleatorio(0, ANCHO)), Math.floor(aleatorio(0, ALTO)), aleatorio(0, 6.28)
+]);
+
+// ---------------------------------------------------------------
+// 2. TRANSFORMACIÓN GEOMÉTRICA 2D: escala -> rotación -> traslación
+// ---------------------------------------------------------------
+function transformarVertice([x, y], posX, posY, escala, angulo) {
+  const xe = x * escala, ye = y * escala;                 // escalamiento
+  const rad = angulo * Math.PI / 180;                     // grados a radianes
+  const xr = xe * Math.cos(rad) - ye * Math.sin(rad);     // rotación
+  const yr = xe * Math.sin(rad) + ye * Math.cos(rad);
+  return [xr + posX, yr + posY];                          // traslación
+}
+
+// Modelos locales (alrededor del origen; la proa apunta hacia arriba, -Y)
+const modeloNave = [[0, -25], [-18, 12.5], [18, 12.5]];
+const modeloLlama = [[-8, 12.5], [8, 12.5], [0, 32]];
+
+// Posiciones de las luces en el modelo local de la nave
+const LUCES_TRASERAS = [[-18, 12.5], [18, 12.5]];
+const DIRECCIONAL_IZQ = [[-9, -6.25], [-18, 12.5]];
+const DIRECCIONAL_DER = [[9, -6.25], [18, 12.5]];
+
+// ---------------------------------------------------------------
+// ESTADO DE LA NAVE
+// ---------------------------------------------------------------
+let posX = 400, posY = 300, angulo = 0;
+const escala = 1.2;
+let proyectiles = [];
+let estela = [];
+let ultimoDisparo = -COOLDOWN_DISPARO;
+let pausado = false;
+let girandoIzq = false, girandoDer = false, avanzando = false, retrocediendo = false;
+let verticesPantalla = [];
+
+// Vector unitario hacia donde apunta la proa (se resta 90° por el eje Y invertido)
+function direccionProa(grados) {
+  const th = (grados - 90) * Math.PI / 180;
+  return [Math.cos(th), Math.sin(th)];
+}
+
+// ---------------------------------------------------------------
+// ENTRADA: teclado y botones táctiles
+// ---------------------------------------------------------------
+const teclas = new Set();
+const tactil = { izq: false, der: false, avance: false, rev: false, fuego: false };
+
+const mapa = {
+  KeyA: 'izq', ArrowLeft: 'izq',
+  KeyD: 'der', ArrowRight: 'der',
+  KeyW: 'avance', ArrowUp: 'avance',
+  KeyS: 'rev', ArrowDown: 'rev',
+  Space: 'fuego'
+};
+
+window.addEventListener('keydown', e => {
+  if (mapa[e.code]) { e.preventDefault(); teclas.add(mapa[e.code]); }
+  if (e.code === 'Escape' && !e.repeat) alternarPausa();
+});
+window.addEventListener('keyup', e => { if (mapa[e.code]) teclas.delete(mapa[e.code]); });
+window.addEventListener('blur', () => teclas.clear());
+
+document.querySelectorAll('#tactil button').forEach(b => {
+  const k = b.dataset.k;
+  const on = e => { e.preventDefault(); tactil[k] = true; b.classList.add('on'); };
+  const off = e => { e.preventDefault(); tactil[k] = false; b.classList.remove('on'); };
+  b.addEventListener('pointerdown', on);
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, off));
+});
+
+const activa = k => teclas.has(k) || tactil[k];
+
+function alternarPausa() {
+  pausado = !pausado;
+  capaPausa.style.display = pausado ? 'flex' : 'none';
+}
+lienzo.addEventListener('click', alternarPausa);
+
+// ---------------------------------------------------------------
+// 3. LÓGICA (un paso = un cuadro a 60 FPS)
+// ---------------------------------------------------------------
+function actualizar() {
+  // Rotación (se guarda el lado porque las direccionales lo necesitan)
+  girandoIzq = activa('izq');
+  girandoDer = activa('der');
+  if (girandoIzq) angulo -= VEL_ROTACION;
+  if (girandoDer) angulo += VEL_ROTACION;
+
+  // Avance y reversa
+  const [dx, dy] = direccionProa(angulo);
+  avanzando = activa('avance');
+  retrocediendo = activa('rev');
+  if (avanzando) { posX += dx * VEL_NAVE; posY += dy * VEL_NAVE; }
+  if (retrocediendo) { posX -= dx * VEL_REVERSA; posY -= dy * VEL_REVERSA; }
+
+  // Pantalla envolvente (módulo que también funciona con negativos)
+  posX = ((posX % ANCHO) + ANCHO) % ANCHO;
+  posY = ((posY % ALTO) + ALTO) % ALTO;
+
+  // Vértices de la nave en pantalla
+  verticesPantalla = modeloNave.map(v => transformarVertice(v, posX, posY, escala, angulo));
+
+  // Estela: al moverse nacen 2 partículas en la cola, con ±3 px de desvío
+  if (avanzando || retrocediendo) {
+    const colaX = posX - dx * 14 * escala;
+    const colaY = posY - dy * 14 * escala;
+    for (let i = 0; i < 2; i++) {
+      estela.push({ x: colaX + aleatorio(-3, 3), y: colaY + aleatorio(-3, 3), vida: VIDA_ESTELA });
+    }
+  }
+  // Envejecer y eliminar partículas
+  estela.forEach(e => e.vida -= 1);
+  estela = estela.filter(e => e.vida > 0);
+
+  // Disparo con cooldown
+  const ahora = performance.now();
+  if (activa('fuego') && ahora - ultimoDisparo >= COOLDOWN_DISPARO) {
+    ultimoDisparo = ahora;
+    const [px, py] = verticesPantalla[0];   // la bala nace en la proa
+    proyectiles.push({ x: px, y: py, vx: dx * VEL_PROYECTIL, vy: dy * VEL_PROYECTIL, vida: VIDA_PROYECTIL });
+  }
+
+  // Actualizar proyectiles: se conservan los que siguen dentro y con vida
+  proyectiles = proyectiles.filter(p => {
+    p.x += p.vx; p.y += p.vy; p.vida -= 1;
+    const dentro = p.x >= 0 && p.x <= ANCHO && p.y >= 0 && p.y <= ALTO;
+    return dentro && p.vida > 0;
+  });
+}
+
+// ---------------------------------------------------------------
+// RENDERIZADO (lo que se dibuja después queda encima)
+// ---------------------------------------------------------------
+function trazarPoligono(vs) {
+  ctx.beginPath();
+  vs.forEach(([x, y], i) => i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
+  ctx.closePath();
+}
+
+// Luz con resplandor: se mueve y gira junto con la nave (usa transformarVertice)
+function dibujarLuz(luzLocal, color) {
+  const [lx, ly] = transformarVertice(luzLocal, posX, posY, escala, angulo);
+  const x = Math.trunc(lx), y = Math.trunc(ly);
+  ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${70 / 255})`;
+  ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI * 2); ctx.fill();      // halo suave
+  ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${120 / 255})`;
+  ctx.beginPath(); ctx.arc(x, y, 11, 0, Math.PI * 2); ctx.fill();      // brillo intenso
+  ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+  ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();       // foco sólido
+  ctx.fillStyle = 'rgb(255, 245, 200)';
+  ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();       // punto claro
+}
+
+let fpsLogica = 0, cuentaLogica = 0, marcaFps = performance.now();
+
+function dibujar() {
+  const ahora = performance.now();
+
+  // 1) Fondo
+  ctx.drawImage(fondoEspacio, 0, 0);
+
+  // 2) Estrellas parpadeantes (el brillo oscila con un seno desfasado)
+  const tms = ahora / 400;
+  for (const [sx, sy, fase] of estrellasParpadeo) {
+    const b = Math.trunc(150 + 105 * Math.sin(tms + fase));
+    ctx.fillStyle = `rgb(${b}, ${b}, ${b})`;
+    ctx.beginPath(); ctx.arc(sx, sy, 1, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 3) Estela: más vieja = más pequeña y más transparente
+  for (const e of estela) {
+    const k = e.vida / VIDA_ESTELA;
+    const radio = Math.max(1, Math.trunc(7 * k));
+    ctx.fillStyle = `rgba(${Math.trunc(80 + 175 * k)}, ${Math.trunc(160 + 70 * k)}, 255, ${(170 * k) / 255})`;
+    ctx.beginPath(); ctx.arc(Math.trunc(e.x), Math.trunc(e.y), radio, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 4) Proyectiles: círculos amarillos de radio 3
+  ctx.fillStyle = 'rgb(255, 220, 80)';
+  for (const p of proyectiles) {
+    ctx.beginPath(); ctx.arc(Math.trunc(p.x), Math.trunc(p.y), 3, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 5) Llama del motor (solo al avanzar), con largo aleatorio para que parpadee
+  if (avanzando) {
+    const largo = aleatorio(0.8, 1.2);
+    const llama = modeloLlama.map(([vx, vy]) =>
+      transformarVertice([vx, vy < 20 ? vy : 12.5 + (vy - 12.5) * largo], posX, posY, escala, angulo));
+    trazarPoligono(llama);
+    ctx.fillStyle = 'rgb(255, 150, 40)'; ctx.fill();
+  }
+
+  // 6) Nave: relleno y borde encima
+  trazarPoligono(verticesPantalla);
+  ctx.fillStyle = COLOR_NAVE; ctx.fill();
+  ctx.lineWidth = 2; ctx.lineJoin = 'miter';
+  ctx.strokeStyle = COLOR_BORDE; ctx.stroke();
+
+  // 7) Luces de reversa: parpadean cada 200 ms
+  if (retrocediendo && Math.floor(ahora / 200) % 2 === 0) {
+    for (const l of LUCES_TRASERAS) dibujarLuz(l, [255, 190, 30]);
+  }
+
+  // 8) Direccionales: parpadean cada 300 ms del lado hacia el que se gira
+  //    (si se giran ambos lados a la vez, parpadean las dos: intermitentes de emergencia)
+  if (Math.floor(ahora / 300) % 2 === 0) {
+    if (girandoIzq) for (const l of DIRECCIONAL_IZQ) dibujarLuz(l, [255, 140, 0]);
+    if (girandoDer) for (const l of DIRECCIONAL_DER) dibujarLuz(l, [255, 140, 0]);
+  }
+
+  // 9) Textos informativos
+  ctx.font = FUENTE; ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgb(200, 200, 210)';
+  ctx.fillText(`Proyectiles activos: ${proyectiles.length}   FPS: ${fpsLogica}`, 10, 10);
+  ctx.fillStyle = 'rgb(120, 120, 135)';
+  ctx.fillText('A/D o flechas izq/der: girar | W/arriba: avanzar | S/abajo: reversa | Espacio: disparar', 10, ALTO - 25);
+}
+
+// ---------------------------------------------------------------
+// BUCLE PRINCIPAL: paso fijo de 1/60 s, sin importar la tasa del monitor
+// ---------------------------------------------------------------
+const PASO = 1000 / FPS;
+let previo = performance.now(), acumulado = 0;
+
+verticesPantalla = modeloNave.map(v => transformarVertice(v, posX, posY, escala, angulo));
+
+function bucle(t) {
+  acumulado += Math.min(t - previo, 250);
+  previo = t;
+  while (acumulado >= PASO) {
+    if (!pausado) actualizar();
+    cuentaLogica++;
+    acumulado -= PASO;
+  }
+  if (t - marcaFps >= 1000) {
+    fpsLogica = Math.round(cuentaLogica * 1000 / (t - marcaFps));
+    cuentaLogica = 0; marcaFps = t;
+  }
+  dibujar();
+  requestAnimationFrame(bucle);
+}
+requestAnimationFrame(bucle);
+</script>
+</body>
+</html>
